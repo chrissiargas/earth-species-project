@@ -1,0 +1,144 @@
+# =====================================================================
+# fruitbat-comm configuration
+# One YAML, grouped by phase (mirrors the data_args / main_args / *_args
+# grouping of hung-asr-aws). Override any key from the CLI:
+#   python -m batcomm_utils.train --phase mil --set mil_args.layer=9
+# =====================================================================
+
+data_args:
+  raw_dir: /data-sinno/c.siargkas/datasets/fruitbat/raw          # extracted WAV folders (searched recursively)
+  annotations_csv: /data-sinno/c.siargkas/datasets/fruitbat/Annotations.csv
+  fileinfo_csv: /data-sinno/c.siargkas/datasets/fruitbat/FileInfo.csv
+  cache_dir: /data-sinno/c.siargkas/datasets/fruitbat/cache      # all derived artefacts live here
+  sampling_rate: 250000
+
+  # --- VERIFY against Metadata.pdf / the CSV headers before the first run ---
+  # Left: internal name used in the code. Right: column header in the CSV.
+  # The audit phase stops and prints the real headers if these are wrong.
+  annotation_columns:
+    file_id: FileID
+    emitter: Emitter
+    addressee: Addressee
+    context: Context
+    start: Start sample          # span of the annotation inside the file (samples)
+    end: End sample
+  fileinfo_columns:
+    file_id: FileID
+    file_name: File name
+    folder: File folder
+    channel: Recording channel
+    time: Recording time
+    treatment: Treatment ID
+    voice_start: Voice start samples   # automatic voiced-segment starts (list per file)
+    voice_end: Voice end samples
+  # Label codes meaning "unknown" (annotators were conservative). VERIFY in Metadata.pdf.
+  unknown_values:
+    emitter: [0]
+    addressee: [0]
+    context: [0]
+
+main_args:
+  experiment_name: fruitbat_baseline
+  seed: 13
+  targets: [emitter, addressee, context]
+  n_folds: 5
+  strict_individual_split: true   # train excludes bags where held-out bats are emitter OR addressee
+  val_fraction: 0.15              # carved from train, grouped by recording day
+  micro_data: false               # debug on a small subset
+  micro_size: 2000                # number of bags when micro_data is true
+
+audit_args:
+  dedup_time_tolerance_s: 0.5     # cross-channel duplicates: same treatment, |dt| < tol, different channel
+
+segment_args:
+  detector: provided              # provided (FileInfo voiced segments) | energy (our detector)
+  bandpass_hz: [1000, 120000]
+  frame_ms: 1.0
+  threshold_db: 12.0              # above the median noise floor
+  min_dur_ms: 5.0
+  merge_gap_ms: 3.0
+  pad_ms: 2.0
+  click_max_dur_ms: 3.0           # echolocation clicks are very short and broadband
+  click_min_flatness: 0.3
+  n_check_files: 100              # files exported for manual detector comparison
+
+embed_args:
+  encoders: [logmel, hubert, whisper]
+  frequency_strategy: resample    # resample (to target_sr, loses ultrasound) | reinterpret (treat 250 kHz as target_sr = slow-down)
+  target_sr: 16000
+  min_input_s: 0.1                # zero-pad very short inputs (SSL conv front-ends need >= ~25 ms)
+  max_input_s: 10.0
+  layers: all                     # all | list of hidden-state indices to keep
+  storage_dtype: float16
+  device: cuda
+  models:
+    hubert: facebook/hubert-base-ls960
+    wavlm: microsoft/wavlm-base-plus
+    whisper: openai/whisper-large-v3
+  logmel:                         # computed at the native 250 kHz rate (no resampling)
+    n_fft: 2048
+    hop: 512
+    n_mels: 64
+    fmin: 500
+    fmax: 120000
+
+probe_args:
+  encoders: [logmel, hubert, whisper]
+  frequency_strategy: resample
+  layers: all
+  tasks:                          # level: syllable (each syllable labelled) | bag (mean-pooled bag)
+    emitter: {level: syllable, split: leave_day_out}
+    context: {level: bag, split: leave_individual_out}
+    addressee: {level: bag, split: leave_individual_out}
+  C: 1.0
+  max_iter: 2000
+
+mil_args:
+  encoder: hubert
+  frequency_strategy: resample
+  layer: 6
+  tasks: [emitter, addressee, context]
+  task_weights: {emitter: 1.0, addressee: 1.0, context: 1.0}
+  primary_task: context           # early stopping / model selection
+  split: leave_individual_out
+  hidden_dim: 256
+  attention_dim: 128
+  dropout: 0.2
+  adversarial: true               # gradient-reversal identity branch on the context representation
+  adversary_target: emitter
+  grl_lambda: 0.5
+  adversary_weight: 0.5
+  max_bag_size: 64
+  top_k_attention: 5              # syllables exported per bag for listening
+  training_args:
+    lr: 0.0003
+    weight_decay: 0.01
+    batch_size: 32
+    epochs: 60
+    patience: 8
+    device: cuda
+    num_workers: 4
+
+discover_args:
+  encoder: hubert
+  frequency_strategy: resample
+  layer: 6
+  pca_dim: 50
+  use_umap: true
+  umap: {n_neighbors: 15, min_dist: 0.0, n_components: 10}
+  kmeans_k: [8, 16, 32, 64]
+  hdbscan_min_cluster_size: 50
+  unit_k: 32                      # k used to export discrete units for the syntax test
+  max_points: 200000
+
+seqlm_args:
+  units_file: null                # default: units exported by the discover phase (unit_k)
+  model: markov                   # markov (numpy) | transformer (torch)
+  n_shuffles: 20
+  smoothing: 0.1
+  transformer: {d_model: 128, n_layers: 2, n_heads: 4, epochs: 20, lr: 0.001, batch_size: 64}
+
+wandb_args:
+  enabled: false
+  project: fruitbat-comm
+  entity: null
